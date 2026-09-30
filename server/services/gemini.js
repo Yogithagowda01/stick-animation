@@ -2,21 +2,21 @@ const { UpstreamError, RateLimitError } = require('../utils/errors');
 
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-// --- Model names -----------------------------------------------------------
-// Verified against ai.google.dev (Gemini API docs) as of Sep 2026.
-// Gemini 2.5 Flash / 2.5 Flash Image are being retired (Oct 2026), so the
-// MVP is built on the current Gemini 3 line instead. Both are overridable
-// via .env in case Google renames/replaces a model again.
-const VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview';
-const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image-preview';
+// Configurable Gemini models from .env with solid defaults
+const RAW_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview';
+const RAW_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image-preview';
 
-const REQUEST_TIMEOUT_MS = 25000;
+// Normalize model names so 'models/gemini-...' does not become '.../models/models/...'
+const VISION_MODEL = RAW_VISION_MODEL.replace(/^models\//, '');
+const IMAGE_MODEL = RAW_IMAGE_MODEL.replace(/^models\//, '');
+
+const REQUEST_TIMEOUT_MS = 30000;
 
 function getApiKey() {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
     throw new UpstreamError(
-      'The AI service is not configured. Please contact the site administrator.',
+      'The AI service is not configured. Please add GEMINI_API_KEY to your .env file.',
       'MISSING_API_KEY',
       500
     );
@@ -28,9 +28,10 @@ async function callGemini(model, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+  const cleanModel = model.replace(/^models\//, '');
   let response;
   try {
-    response = await fetch(`${GEMINI_BASE_URL}/${model}:generateContent`, {
+    response = await fetch(`${GEMINI_BASE_URL}/${cleanModel}:generateContent`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -67,7 +68,7 @@ async function callGemini(model, body) {
     } catch {
       /* ignore body-parse failures */
     }
-    console.error(`Gemini ${model} error ${response.status}:`, details);
+    console.error(`Gemini ${cleanModel} error ${response.status}:`, details);
     throw new UpstreamError(
       'The AI service could not process this request right now. Please try again shortly.',
       'UPSTREAM_ERROR',
@@ -96,15 +97,56 @@ const ANALYSIS_SCHEMA = {
   required: ['recognized', 'description', 'pose', 'action', 'objects'],
 };
 
+function extractAndParseJson(parts) {
+  if (!Array.isArray(parts) || parts.length === 0) return null;
+
+  // Search candidate parts for text content, preferring non-thought parts
+  const textParts = parts.filter((p) => typeof p.text === 'string' && !p.thought);
+  const candidates = textParts.length ? textParts : parts.filter((p) => typeof p.text === 'string');
+
+  for (const part of candidates) {
+    let text = part.text.trim();
+
+    // Strip markdown JSON delimiters if present
+    if (text.startsWith('```json')) {
+      text = text.slice(7);
+    } else if (text.startsWith('```')) {
+      text = text.slice(3);
+    }
+    if (text.endsWith('```')) {
+      text = text.slice(0, -3);
+    }
+    text = text.trim();
+
+    // Attempt direct parse
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Find outermost JSON object if surrounded by preamble/postamble
+      const firstBrace = text.indexOf('{');
+      const lastBrace = text.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        try {
+          return JSON.parse(text.slice(firstBrace, lastBrace + 1));
+        } catch {
+          // continue loop
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 async function analyzeDrawing(base64Image, mimeType) {
-  const prompt = `You are looking at a simple, possibly rough, hand-drawn sketch (likely a stick figure and/or a few objects). Identify:
-- whether the sketch is clear enough to interpret at all ("recognized")
-- a one-sentence description of what is drawn
-- how many characters/figures are present
-- the main character's pose in a few words
-- the single best-matching action for the main character
-- a short list of any distinct objects drawn (e.g. "ball", "tree", "sun")
-If the sketch is just scribbles, a few disconnected lines, or otherwise not interpretable as a figure or scene, set recognized to false.`;
+  const prompt = `You are looking at a hand-drawn sketch (typically a stick figure and optional objects).
+Analyze the drawing carefully:
+1. "recognized": true if you see a figure, person, stick figure, or recognizable scene; false ONLY if it's completely empty or meaningless scribbles.
+2. "description": One concise, clear sentence describing the character and scene.
+3. "characterCount": Integer count of distinct characters/figures (default 1).
+4. "pose": Brief phrase describing character pose (e.g. "standing with arms raised", "running forward", "kicking").
+5. "action": Choose exactly ONE best matching action from: 'run', 'jump', 'wave', 'walk', 'kick', 'dance', 'idle', 'other'.
+6. "objects": Array of distinct items/props detected (e.g. ["ball", "sun"]). Empty array if none.`;
 
   const body = {
     contents: [
@@ -118,25 +160,27 @@ If the sketch is just scribbles, a few disconnected lines, or otherwise not inte
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: ANALYSIS_SCHEMA,
-      temperature: 0.4,
+      temperature: 0.2,
     },
   };
 
-  const data = await callGemini(VISION_MODEL, body);
-
-  const textPart = data?.candidates?.[0]?.content?.parts?.find((p) => typeof p.text === 'string');
-  if (!textPart) {
-    throw new UpstreamError(
-      "We couldn't understand this drawing. Try drawing a clearer stick figure.",
-      'INVALID_AI_RESPONSE',
-      502
-    );
-  }
-
-  let parsed;
+  let data;
   try {
-    parsed = JSON.parse(textPart.text);
-  } catch {
+    data = await callGemini(VISION_MODEL, body);
+  } catch (visionErr) {
+    // If preview model encounters quota/model error, try stable gemini-2.5-flash fallback
+    if (VISION_MODEL !== 'gemini-2.5-flash') {
+      console.warn(`Primary vision model ${VISION_MODEL} failed, trying gemini-2.5-flash:`, visionErr.message);
+      data = await callGemini('gemini-2.5-flash', body);
+    } else {
+      throw visionErr;
+    }
+  }
+
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const parsed = extractAndParseJson(parts);
+
+  if (!parsed) {
     throw new UpstreamError(
       "We couldn't understand this drawing. Try drawing a clearer stick figure.",
       'INVALID_AI_RESPONSE',
@@ -144,14 +188,22 @@ If the sketch is just scribbles, a few disconnected lines, or otherwise not inte
     );
   }
 
-  return parsed;
+  // Sanitize and ensure standard structure
+  return {
+    recognized: Boolean(parsed.recognized ?? true),
+    description: parsed.description || 'A hand-drawn stick figure.',
+    pose: parsed.pose || 'Standing',
+    action: typeof parsed.action === 'string' ? parsed.action.toLowerCase() : 'idle',
+    objects: Array.isArray(parsed.objects) ? parsed.objects : [],
+    characterCount: Number.isInteger(parsed.characterCount) ? parsed.characterCount : 1,
+  };
 }
 
 // --- 2. Image generation (with Pollinations fallback) -----------------------
 
 const STYLE_PROMPTS = {
-  cartoon: 'colorful, clean-lined 2D cartoon style, flat shading, friendly and playful',
-  anime: 'vibrant Japanese anime / manga art style, expressive linework, soft cel shading',
+  cartoon: 'colorful, clean-lined 2D cartoon style, flat shading, friendly and playful, highly vibrant',
+  anime: 'vibrant Japanese anime / manga art style, expressive linework, soft cel shading, detailed lighting',
   pixel: 'retro 16-bit pixel art style, crisp pixels, limited color palette, game-sprite look',
 };
 
@@ -196,8 +248,6 @@ async function generateSceneWithGemini(analysis, style) {
 }
 
 async function generateSceneWithPollinations(analysis, style) {
-  // Keyless, free fallback so the demo still works if Gemini image
-  // generation is rate-limited or briefly unavailable.
   const prompt = buildScenePrompt(analysis, style);
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true`;
 

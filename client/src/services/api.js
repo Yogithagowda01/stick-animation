@@ -17,7 +17,7 @@ async function post(path, body) {
     return {
       ok: false,
       code: 'NETWORK_ERROR',
-      message: "We couldn't reach the server. Check your connection and try again.",
+      message: `Could not reach backend API at ${API_BASE}. Make sure the server is running on port 5000 (npm run dev:server).`,
     };
   }
 

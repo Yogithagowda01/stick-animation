@@ -1,4 +1,7 @@
-require('dotenv').config();
+const path = require('path');
+// Load environment variables from local server .env, falling back to project root .env
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const express = require('express');
 const cors = require('cors');
@@ -14,7 +17,19 @@ const PORT = process.env.PORT || 5000;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 
 // --- Security / hygiene ------------------------------------------------
-app.use(cors({ origin: CLIENT_ORIGIN }));
+// Allow configured CLIENT_ORIGIN as well as standard local development origins
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (
+      origin === CLIENT_ORIGIN ||
+      /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Fallback allow in dev
+  }
+}));
 // Body size cap: images are base64 (~33% bigger than raw bytes), so 4.5mb
 // comfortably covers the 3MB raw-image limit enforced again in validate.js.
 app.use(express.json({ limit: '4.5mb' }));

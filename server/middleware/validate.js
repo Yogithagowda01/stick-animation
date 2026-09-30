@@ -1,27 +1,25 @@
 const { ValidationError } = require('../utils/errors');
 
-// Hard ceiling on the raw (decoded) image size we accept. Keeps memory/
-// bandwidth bounded and blocks accidental multi-MB uploads.
-const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3 MB
-// A sketch this small is almost certainly a blank/near-blank canvas.
-const MIN_IMAGE_BYTES = 300;
+// Hard ceiling on the raw (decoded) image size we accept.
+const MAX_IMAGE_BYTES = 4.5 * 1024 * 1024;
+// A canvas with at least one mark will exceed this minimal threshold.
+const MIN_IMAGE_BYTES = 50;
 
 const ALLOWED_STYLES = ['cartoon', 'anime', 'pixel'];
 const ALLOWED_ACTIONS = ['run', 'jump', 'wave', 'walk', 'kick', 'dance', 'idle', 'other'];
 
-const DATA_URL_RE = /^data:image\/(png|jpeg|jpg|webp);base64,([A-Za-z0-9+/=]+)$/;
-
 /**
  * Validates a `data:image/...;base64,...` string.
- * Returns the raw base64 payload (without the prefix) and its byte size.
- * Throws ValidationError with a user-facing message on any problem.
+ * Returns the raw base64 payload (without the prefix), MIME type, and its byte size.
+ * Handles whitespace, newlines, and various image formats safely.
  */
 function parseImageDataUrl(dataUrl) {
   if (!dataUrl || typeof dataUrl !== 'string') {
     throw new ValidationError('No drawing was received. Please draw something first.', 'EMPTY_CANVAS');
   }
 
-  const match = dataUrl.match(DATA_URL_RE);
+  const trimmed = dataUrl.trim();
+  const match = trimmed.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
   if (!match) {
     throw new ValidationError(
       'That image could not be read. Please try drawing again.',
@@ -29,12 +27,19 @@ function parseImageDataUrl(dataUrl) {
     );
   }
 
-  const [, , base64] = match;
+  const rawFormat = match[1].toLowerCase();
+  const allowedFormats = ['png', 'jpeg', 'jpg', 'webp'];
+  if (!allowedFormats.includes(rawFormat)) {
+    throw new ValidationError('Unsupported image format. Please use PNG, JPEG, or WebP.', 'INVALID_IMAGE_FORMAT');
+  }
+
+  // Clean any accidental whitespace or newlines inside base64 payload
+  const base64 = match[2].replace(/\s+/g, '');
   const byteSize = Buffer.byteLength(base64, 'base64');
 
   if (byteSize < MIN_IMAGE_BYTES) {
     throw new ValidationError(
-      "Looks like the canvas is empty. Draw something before analyzing.",
+      'Looks like the canvas is empty. Draw something before analyzing.',
       'EMPTY_CANVAS'
     );
   }
@@ -46,7 +51,8 @@ function parseImageDataUrl(dataUrl) {
     );
   }
 
-  return { base64, byteSize, mimeType: `image/${match[1] === 'jpg' ? 'jpeg' : match[1]}` };
+  const mimeType = `image/${rawFormat === 'jpg' ? 'jpeg' : rawFormat}`;
+  return { base64, byteSize, mimeType };
 }
 
 function assertAllowedStyle(style) {
@@ -59,8 +65,6 @@ function assertAllowedStyle(style) {
 }
 
 function normalizeAction(action) {
-  // Never hard-fail on animation: unknown/missing actions just fall back
-  // to a safe default so the user is never blocked at the final step.
   if (typeof action === 'string' && ALLOWED_ACTIONS.includes(action.toLowerCase())) {
     return action.toLowerCase();
   }

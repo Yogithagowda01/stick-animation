@@ -12,12 +12,12 @@ router.post('/', async (req, res, next) => {
     const analysis = await analyzeDrawing(base64, mimeType);
 
     if (!analysis.recognized) {
-      // Not an error: the request succeeded, the model just couldn't make
-      // sense of the sketch. Let the client show a friendly retry prompt.
+      // Model couldn't make sense of the sketch, return description and friendly notice
       return res.json({
         ok: true,
         recognized: false,
-        message: "We couldn't understand this drawing. Try drawing a clearer stick figure.",
+        message: analysis.description || "We couldn't understand this drawing. Try drawing a clearer stick figure.",
+        analysis,
       });
     }
 

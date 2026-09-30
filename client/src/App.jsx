@@ -8,13 +8,27 @@ import ScenePreview from './components/ScenePreview.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
 import { analyzeDrawing, generateScene, animateScene } from './services/api.js';
 
-// The user should always know what's happening — these labels back the
-// four-stage pipeline shown while any AI call is in flight.
 const STAGE_LABELS = {
   analyzing: 'Analyzing your drawing...',
-  generating: 'Creating your scene...',
-  animating: 'Bringing it to life...',
+  generating: 'Creating your scene with Gemini AI...',
+  animating: 'Applying motion and bringing scene to life...',
 };
+
+const STEPS_META = [
+  { id: 1, label: 'Draw', key: 'draw' },
+  { id: 2, label: 'AI Understands', key: 'vision' },
+  { id: 3, label: 'Generate Scene', key: 'generate' },
+  { id: 4, label: 'Animate', key: 'animate' },
+];
+
+const INSPIRATION_IDEAS = [
+  '🏃 Running figure',
+  '🕺 Dancing stickman',
+  '⚽ Kicking a ball',
+  '🤸 Jumping stick figure',
+  '👋 Waving hello',
+  '🧘 Meditating stick figure',
+];
 
 export default function App() {
   const canvasRef = useRef(null);
@@ -23,26 +37,40 @@ export default function App() {
   // | 'style' | 'generating' | 'generate-error' | 'animating' | 'done'
   const [step, setStep] = useState('draw');
 
-  const [strokeColor, setStrokeColor] = useState('#1f2a44');
+  const [strokeColor, setStrokeColor] = useState('#0f172a');
   const [strokeWidth, setStrokeWidth] = useState(4);
   const [eraseMode, setEraseMode] = useState(false);
   const [inlineNotice, setInlineNotice] = useState('');
 
+  // Stored assets for the pipeline & comparison
+  const [sketchImage, setSketchImage] = useState(null);
   const [analysis, setAnalysis] = useState(null);
-  const [style, setStyle] = useState(null);
+  const [style, setStyle] = useState('cartoon');
   const [sceneImage, setSceneImage] = useState(null);
   const [animation, setAnimation] = useState(null);
   const [lastErrorMessage, setLastErrorMessage] = useState('');
+
+  // Helper to determine which of the 4 visual pipeline stages is active
+  function getActivePipelineStage() {
+    if (step === 'draw') return 1;
+    if (['analyzing', 'unrecognized', 'analyze-error', 'analyzed'].includes(step)) return 2;
+    if (['style', 'generating', 'generate-error'].includes(step)) return 3;
+    if (['animating', 'done'].includes(step)) return 4;
+    return 1;
+  }
+
+  const currentStageNum = getActivePipelineStage();
 
   async function handleAnalyzeClick() {
     setInlineNotice('');
     const blank = await canvasRef.current.isBlank();
     if (blank) {
-      setInlineNotice('Please draw something before analyzing.');
+      setInlineNotice('Please sketch a stick figure before analyzing.');
       return;
     }
 
     const image = await canvasRef.current.exportImage();
+    setSketchImage(image);
     setStep('analyzing');
 
     const result = await analyzeDrawing(image);
@@ -68,10 +96,11 @@ export default function App() {
   }
 
   async function handleGenerate(selectedStyle) {
-    setStyle(selectedStyle);
+    const targetStyle = selectedStyle || style;
+    setStyle(targetStyle);
     setStep('generating');
 
-    const result = await generateScene(analysis, selectedStyle);
+    const result = await generateScene(analysis, targetStyle);
     if (!result.ok) {
       setLastErrorMessage(result.message);
       setStep('generate-error');
@@ -81,9 +110,7 @@ export default function App() {
     setSceneImage(result.image);
     setStep('animating');
 
-    // Animation is deterministic and near-impossible to fail server-side,
-    // but we still degrade gracefully to a default if the call itself
-    // fails (e.g. a network hiccup) rather than blocking the final step.
+    // Fetch deterministic animation preset based on detected action
     const animResult = await animateScene(analysis.action);
     if (animResult.ok) {
       setAnimation(animResult.animation);
@@ -95,8 +122,9 @@ export default function App() {
 
   function handleStartOver() {
     canvasRef.current?.clear();
+    setSketchImage(null);
     setAnalysis(null);
-    setStyle(null);
+    setStyle('cartoon');
     setSceneImage(null);
     setAnimation(null);
     setLastErrorMessage('');
@@ -108,40 +136,121 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <h1>Stick Figure &rarr; Animated Scene</h1>
-        <p className="app-subtitle">Draw &rarr; AI Understands &rarr; Generate &rarr; Animate</p>
+      {/* Top Bar Navigation */}
+      <nav className="app-topbar">
+        <div className="brand-wrapper">
+          <div className="brand-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="5" r="3" />
+              <path d="M12 8v8M12 11l-5 4M12 11l5 4M12 16l-4 5M12 16l4 5" />
+            </svg>
+          </div>
+          <div>
+            <h1 className="brand-title">AnimSketch AI</h1>
+          </div>
+          <span className="brand-badge">Studio MVP</span>
+        </div>
+
+        <div className="header-meta">
+          <div className="model-pill">
+            <span className="status-dot" />
+            <span>Gemini Vision + Image</span>
+          </div>
+        </div>
+      </nav>
+
+      {/* Hero Intro */}
+      <header className="hero-section">
+        <h2 className="hero-heading">
+          Stick Figure <span className="gradient-text">&rarr; Animated Scene</span>
+        </h2>
+        <p className="hero-subtitle">
+          Sketch a stick figure on the studio pad. AI understands your pose, generates a rich stylized scene, and brings it to life with motion.
+        </p>
       </header>
 
-      <main className="app-main">
-        <section className="draw-section">
-          <DrawingCanvas
-            ref={canvasRef}
-            strokeColor={strokeColor}
-            strokeWidth={strokeWidth}
-            eraseMode={eraseMode}
-          />
-          <DrawingToolbar
-            strokeColor={strokeColor}
-            onStrokeColorChange={setStrokeColor}
-            strokeWidth={strokeWidth}
-            onStrokeWidthChange={setStrokeWidth}
-            eraseMode={eraseMode}
-            onToggleErase={setEraseMode}
-            onUndo={() => canvasRef.current?.undo()}
-            onRedo={() => canvasRef.current?.redo()}
-            onClear={() => canvasRef.current?.clear()}
-            onAnalyze={handleAnalyzeClick}
-            disabled={isCanvasLocked}
-          />
-          {inlineNotice && <p className="inline-notice">{inlineNotice}</p>}
-        </section>
+      {/* 4-Step Pipeline Flow Indicator */}
+      <div className="pipeline-stepper" role="navigation" aria-label="Creation pipeline steps">
+        {STEPS_META.map((s, index) => {
+          const isCurrent = currentStageNum === s.id;
+          const isDone = currentStageNum > s.id;
+          return (
+            <React.Fragment key={s.id}>
+              <div className={`step-item ${isCurrent ? 'active' : ''} ${isDone ? 'completed' : ''}`}>
+                <span className="step-num">{isDone ? '✓' : s.id}</span>
+                <span>{s.label}</span>
+              </div>
+              {index < STEPS_META.length - 1 && <span className="step-divider">&rarr;</span>}
+            </React.Fragment>
+          );
+        })}
+      </div>
 
+      {/* Main Workspace Layout */}
+      <main className="workspace-grid">
+        {/* Draw Section: Visible during drawing & analysis */}
+        {['draw', 'analyzing', 'unrecognized', 'analyze-error', 'analyzed'].includes(step) && (
+          <section className="studio-card">
+            <div className="card-header-bar">
+              <div className="card-title-group">
+                <span style={{ fontSize: '1.2rem' }}>✏️</span>
+                <h3>Step 1: Draw Your Stick Figure</h3>
+              </div>
+              <span className={`card-badge ${step === 'draw' ? 'live' : ''}`}>
+                {step === 'draw' ? 'Canvas Active' : 'Canvas Locked'}
+              </span>
+            </div>
+
+            {/* Quick Inspiration Ideas */}
+            {step === 'draw' && (
+              <div className="quick-tips-bar">
+                <span className="quick-tip-label">💡 Ideas:</span>
+                {INSPIRATION_IDEAS.map((idea, idx) => (
+                  <span key={idx} className="quick-chip">
+                    {idea}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <DrawingCanvas
+              ref={canvasRef}
+              strokeColor={strokeColor}
+              strokeWidth={strokeWidth}
+              eraseMode={eraseMode}
+            />
+
+            <DrawingToolbar
+              strokeColor={strokeColor}
+              onStrokeColorChange={setStrokeColor}
+              strokeWidth={strokeWidth}
+              onStrokeWidthChange={setStrokeWidth}
+              eraseMode={eraseMode}
+              onToggleErase={setEraseMode}
+              onUndo={() => canvasRef.current?.undo()}
+              onRedo={() => canvasRef.current?.redo()}
+              onClear={() => canvasRef.current?.clear()}
+              onAnalyze={handleAnalyzeClick}
+              disabled={isCanvasLocked}
+            />
+
+            {inlineNotice && (
+              <div className="inline-notice">
+                <span>⚠️</span>
+                <span>{inlineNotice}</span>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Pipeline Feedback & Result Stages */}
         <section className="pipeline-section">
+          {/* 1. Analyzing Loading */}
           {step === 'analyzing' && (
             <AnalysisPanel status="loading" stageLabel={STAGE_LABELS.analyzing} />
           )}
 
+          {/* 2. Unrecognized Sketch Retry */}
           {step === 'unrecognized' && (
             <AnalysisPanel
               status="unrecognized"
@@ -150,26 +259,50 @@ export default function App() {
             />
           )}
 
+          {/* 3. Analysis Error */}
           {step === 'analyze-error' && (
-            <AnalysisPanel status="error" errorMessage={lastErrorMessage} onRetry={handleAnalyzeClick} />
+            <AnalysisPanel
+              status="error"
+              errorMessage={lastErrorMessage}
+              onRetry={handleAnalyzeClick}
+            />
           )}
 
+          {/* 4. Analysis Succeeded */}
           {step === 'analyzed' && (
             <AnalysisPanel
               status="success"
               analysis={analysis}
+              sketchImage={sketchImage}
               onContinue={handleContinueToStyle}
             />
           )}
 
-          {step === 'style' && <SceneOptions onGenerate={handleGenerate} />}
+          {/* 5. Style Picker */}
+          {step === 'style' && (
+            <SceneOptions
+              analysis={analysis}
+              onGenerate={handleGenerate}
+              onBack={() => setStep('analyzed')}
+            />
+          )}
 
-          {step === 'generating' && <GenerationLoader stageLabel={STAGE_LABELS.generating} />}
+          {/* 6. Generating Image Loading */}
+          {step === 'generating' && (
+            <GenerationLoader stageLabel={STAGE_LABELS.generating} />
+          )}
 
+          {/* 7. Image Generation Error */}
           {step === 'generate-error' && (
-            <div className="panel error-panel">
-              <p>{lastErrorMessage}</p>
-              <div className="result-actions">
+            <div className="studio-card error-card">
+              <div className="error-icon">⚠️</div>
+              <div>
+                <h3 className="error-title">Generation Issue</h3>
+                <p className="error-text">
+                  {lastErrorMessage || 'The AI service could not create an image for this scene.'}
+                </p>
+              </div>
+              <div className="result-actions-cluster">
                 <button type="button" onClick={() => setStep('style')}>
                   Change Style
                 </button>
@@ -180,6 +313,7 @@ export default function App() {
             </div>
           )}
 
+          {/* 8. Animating Transition */}
           {step === 'animating' && (
             <>
               <ScenePreview imageSrc={sceneImage} />
@@ -187,11 +321,24 @@ export default function App() {
             </>
           )}
 
+          {/* 9. Final Animated Scene Result */}
           {step === 'done' && (
-            <ResultPanel imageSrc={sceneImage} animation={animation} onStartOver={handleStartOver} />
+            <ResultPanel
+              imageSrc={sceneImage}
+              sketchSrc={sketchImage}
+              animation={animation}
+              onStartOver={handleStartOver}
+              onChangeStyle={() => setStep('style')}
+              onRegenerate={() => handleGenerate(style)}
+            />
           )}
         </section>
       </main>
+
+      {/* Footer */}
+      <footer className="app-footer">
+        <p>AnimSketch AI Studio &bull; Powered by Gemini 3 Flash &amp; Flash-Image &bull; Pure React &amp; CSS</p>
+      </footer>
     </div>
   );
 }
